@@ -20,6 +20,7 @@ ab_min = float(sys.argv[6])
 ab_max = float(sys.argv[7])
 cores = sys.argv[8]  # string
 mem = int(np.floor(float(sys.argv[9])))
+af_threshold = float(sys.argv[10])
 
 hl.init(min_block_size=128, spark_conf={"spark.executor.cores": cores, 
                     "spark.executor.memory": f"{mem}g",
@@ -28,7 +29,6 @@ hl.init(min_block_size=128, spark_conf={"spark.executor.cores": cores,
                     }, tmp_dir="tmp", local_tmpdir="tmp")
 
 mt = hl.import_vcf(vcf_uri, reference_genome='GRCh38', force_bgz=True, call_fields=[], array_elements_required=False)
-    mt = mt.filter_rows(mt.info.AF[0]<0.01)
 
 mt = mt.annotate_entries(AB = mt.AD[1] / hl.sum(mt.AD))
 
@@ -45,6 +45,39 @@ ped = pd.read_csv(ped_uri, sep='\t').iloc[:,:6]
 ped.columns = ['family_id', 'sample_id', 'paternal_id', 'maternal_id', 'sex', 'phenotype']
 
 mt = mt.filter_cols(hl.array(ped['sample_id'].dropna().tolist()).contains(mt.s))
+
+### annotate against gnomAD
+gnomad_ht = hl.read_table('gs://gcp-public-data--gnomad/release/2.1.1/liftover_grch38/ht/exomes/gnomad.exomes.r2.1.1.sites.liftover_grch38.ht')
+mt = mt.annotate_rows(gnomad_non_neuro_AF_afr = gnomad_ht.index(mt.row_key).freq[hl.eval(gnomad_ht.freq_index_dict["non_neuro_afr"])].AF,
+gnomad_non_neuro_AF_amr =  gnomad_ht.index(mt.row_key).freq[hl.eval(gnomad_ht.freq_index_dict["non_neuro_amr"])].AF,
+gnomad_non_neuro_AF_asj =  gnomad_ht.index(mt.row_key).freq[hl.eval(gnomad_ht.freq_index_dict["non_neuro_asj"])].AF,
+gnomad_non_neuro_AF_eas =  gnomad_ht.index(mt.row_key).freq[hl.eval(gnomad_ht.freq_index_dict["non_neuro_eas"])].AF,
+gnomad_non_neuro_AF_fin =  gnomad_ht.index(mt.row_key).freq[hl.eval(gnomad_ht.freq_index_dict["non_neuro_fin"])].AF,
+gnomad_non_neuro_AF_nfe =  gnomad_ht.index(mt.row_key).freq[hl.eval(gnomad_ht.freq_index_dict["non_neuro_nfe"])].AF,
+gnomad_non_neuro_AF_oth =  gnomad_ht.index(mt.row_key).freq[hl.eval(gnomad_ht.freq_index_dict["non_neuro_oth"])].AF,
+gnomad_non_neuro_AF_sas =  gnomad_ht.index(mt.row_key).freq[hl.eval(gnomad_ht.freq_index_dict["non_neuro_sas"])].AF)
+# Set missing values to zero
+mt = mt.annotate_rows(gnomad_non_neuro_AF_afr = hl.if_else(hl.is_defined(mt.gnomad_non_neuro_AF_afr), mt.gnomad_non_neuro_AF_afr, 0),
+gnomad_non_neuro_AF_amr = hl.if_else(hl.is_defined(mt.gnomad_non_neuro_AF_amr), mt.gnomad_non_neuro_AF_amr, 0),
+gnomad_non_neuro_AF_asj = hl.if_else(hl.is_defined(mt.gnomad_non_neuro_AF_asj), mt.gnomad_non_neuro_AF_asj, 0),
+gnomad_non_neuro_AF_eas = hl.if_else(hl.is_defined(mt.gnomad_non_neuro_AF_eas), mt.gnomad_non_neuro_AF_eas, 0),
+gnomad_non_neuro_AF_fin = hl.if_else(hl.is_defined(mt.gnomad_non_neuro_AF_fin), mt.gnomad_non_neuro_AF_fin, 0),
+gnomad_non_neuro_AF_nfe = hl.if_else(hl.is_defined(mt.gnomad_non_neuro_AF_nfe), mt.gnomad_non_neuro_AF_nfe, 0),
+gnomad_non_neuro_AF_oth = hl.if_else(hl.is_defined(mt.gnomad_non_neuro_AF_oth), mt.gnomad_non_neuro_AF_oth, 0),
+gnomad_non_neuro_AF_sas = hl.if_else(hl.is_defined(mt.gnomad_non_neuro_AF_sas), mt.gnomad_non_neuro_AF_sas, 0) )
+
+# Take gnomad popmax
+mt = mt.annotate_rows(gnomad_non_neuro_AF_popmax = hl.max(mt.gnomad_non_neuro_AF_afr, 
+mt.gnomad_non_neuro_AF_amr,
+mt.gnomad_non_neuro_AF_asj, 
+mt.gnomad_non_neuro_AF_eas,
+mt.gnomad_non_neuro_AF_fin, 
+mt.gnomad_non_neuro_AF_nfe,
+mt.gnomad_non_neuro_AF_oth, 
+mt.gnomad_non_neuro_AF_sas))
+
+# apply gnomad popmax filtering
+mt = mt.filter_entries(mt.gnomad_non_neuro_AF_popmax<0.0001)
 
 # annotate phenotype
 ped_ht = hl.import_table(ped_uri).key_by('sample_id')
@@ -223,6 +256,7 @@ mt_csq_filt = mt_csq_filt.filter_rows(hl.is_defined(mt_csq_filt.overall_csq_term
 mt_csq_filt_controls = mt_csq_filt.filter_cols(mt_csq_filt.phenotype=='1')
 mt_csq_filt_controls = hl.variant_qc(mt_csq_filt_controls)
 mt_csq_filt_controls = mt_csq_filt_controls.filter_rows(mt_csq_filt_controls.variant_qc.AC[1]>0)
+mt_csq_filt_controls = mt_csq_filt_controls.filter_rows(mt_csq_filt_controls.info.cohort_AF<=af_threshold)
 mt_csq_controls_rows = mt_csq_filt_controls.rows()
 
 count_mt_controls = mt_csq_controls_rows.group_by(mt_csq_controls_rows.vep.worst_csq.SYMBOL)\
